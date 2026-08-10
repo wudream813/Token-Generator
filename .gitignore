@@ -1,0 +1,10 @@
+# Compiles
+*.exe
+*.o
+*.obj
+
+# Temp or IDE files
+.vs/
+*.user
+*.suo
+*.db
