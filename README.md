@@ -1,4 +1,4 @@
-# Token-Generator 🪙
+# Token-Generator
 
 一个现代、高级、高性能的 Windows 安全凭证与令牌伪造工具。
 
@@ -6,7 +6,7 @@
 
 ---
 
-## 🌟 最新版重磅升级与改进 (Latest Enhancements)
+## 最新版重磅升级与改进 (Latest Enhancements)
 
 1. **安全预设极简优化**
    - 移除了原版较为鸡肋且低权限的 `Normal` 预设。
@@ -36,7 +36,7 @@
 
 ---
 
-## 🛠️ 编译与生成 (Compilation)
+## 编译与生成 (Compilation)
 
 资源文件 `resources.rc` 已将清单文件 `TokenGenerator.manifest` 绑定。编译出来的 `.exe` 将自动在双击时向 Windows 申请 UAC 管理员提权，并加载现代 Common-Controls v6 视觉样式。
 
@@ -55,7 +55,7 @@
 
 ---
 
-## 🚀 命令行 (CLI) 自动化调用参数
+## 命令行 (CLI) 自动化调用参数
 
 为兼容脚本和安全武器化集成，程序支持完全无黑框后台静默运行：
 
@@ -88,5 +88,3 @@ TokenGenerator.exe -IL:Low -M:Hide "powershell.exe -ExecutionPolicy Bypass -File
 ```
 
 ---
-
-*Developed and upgraded with ❤️ by Arena.ai*
