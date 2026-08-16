@@ -980,11 +980,18 @@ BOOL ExecuteSudoOperation(
     si.dwFlags = STARTF_USESHOWWINDOW;
     si.wShowWindow = windowMode;
     PROCESS_INFORMATION pi = {};
-    DWORD dwCreationFlags = CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_CONSOLE;
+    DWORD dwCreationFlags = CREATE_UNICODE_ENVIRONMENT;
+    if (windowMode != -1) dwCreationFlags |= CREATE_NEW_CONSOLE;
     LPCSTR lpCurrentDir = workingDir.empty() ? NULL : workingDir.c_str();
 
+    if (windowMode == -1) {
+        si.dwFlags |= STARTF_USESTDHANDLES;
+        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+        si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+        si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    }
     BOOL success = CreateProcessAsUserA(
-        hToken, NULL, cmdLine, NULL, NULL, FALSE,
+        hToken, NULL, cmdLine, NULL, NULL, (windowMode == -1) ? TRUE : FALSE,
         dwCreationFlags, lpEnv, lpCurrentDir, &si, &pi
     );
 
@@ -1483,6 +1490,11 @@ LRESULT CALLBACK GroupEditorWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     static HWND hList;
     switch (msg) {
         case WM_CREATE: {
+            HICON hIcon = LoadIconA(GetModuleHandle(NULL), "IDI_ICON1");
+            if (hIcon) {
+                SendMessageA(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
+                SendMessageA(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
+            }
             EnableImmersiveDarkMode(hwnd, g_bDarkMode);
             HFONT hFont = CreateFontA(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, GB2312_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, "Microsoft YaHei");
             
@@ -1659,6 +1671,11 @@ LRESULT CALLBACK PrivilegeEditorWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
     static HWND hList;
     switch (msg) {
         case WM_CREATE: {
+            HICON hIcon = LoadIconA(GetModuleHandle(NULL), "IDI_ICON1");
+            if (hIcon) {
+                SendMessageA(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
+                SendMessageA(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
+            }
             EnableImmersiveDarkMode(hwnd, g_bDarkMode);
             HFONT hFont = CreateFontA(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, GB2312_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, "Microsoft YaHei");
             
@@ -1832,6 +1849,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             EnableImmersiveDarkMode(hwnd, g_bDarkMode);
             InitializeThemeResources();
             
+            //                  
+            HICON hIcon = LoadIconA(GetModuleHandle(NULL), "IDI_ICON1");
+            if (hIcon) {
+                SendMessageA(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
+                SendMessageA(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
+            }
+
             INITCOMMONCONTROLSEX icex; 
             icex.dwSize = sizeof(INITCOMMONCONTROLSEX); 
             icex.dwICC = ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES; 

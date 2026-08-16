@@ -6,6 +6,228 @@
 
 ---
 
+## 🧠 Windows 内存凭证与自定义安全令牌锻造深度解析 (Windows Access Token Forgery & Deep Internals)
+
+在 Windows NT 安全子系统中，**访问令牌 (Access Token)** 是定义进程/线程安全上下文（Security Context）的最高核心结构。它不仅包含了当前主体（Subject）的**用户安全标识符 (User SID)**、**安全组列表 (Group SIDs)**、**强制完整性级别 (Integrity Level)**，还拥有数十项控制系统敏感操作的**特权集合 (Privileges)**。
+
+传统的提权或越权工具多依赖于简单的令牌复制（如 `DuplicateTokenEx`），其局限性在于无法脱离已有物理令牌的限制，无法自由订制主体身份、任意注入安全组以及全量激活 35 项内核级核心特权。
+
+**Token-Generator** 采用了一种更为底层的原生锻造方法：通过直接读取 LSASS 内存凭证进行高级线程模拟，并调用未公开的 Native API `NtCreateToken`，在内核态直接拼装并锻造出全新的、高度自定义的安全访问令牌。
+
+以下是该方案的四大核心物理阶段与底层源码级机理的详尽拆解：
+
+```
++----------------------------------------------------------------------------------------------------+
+|                                    WINDOWS TOKEN FORGERY PIPELINE                                  |
++----------------------------------------------------------------------------------------------------+
+|                                                                                                    |
+|  [Phase 1: Credentials Theft]                                                                      |
+|  Current Process --(SeDebugPrivilege)--> OpenProcess(LSASS) --> OpenProcessToken()                 |
+|                                                                                                    |
+|                                                     |                                              |
+|                                                     v                                              |
+|                                                                                                    |
+|  [Phase 2: Thread Impersonation]                                                                   |
+|  ImpersonateLoggedOnUser(LSASS_Token) => Elevates thread context to NT AUTHORITY\SYSTEM            |
+|                                           (Unlocks SeCreateTokenPrivilege & SeTcbPrivilege)        |
+|                                                                                                    |
+|                                                     |                                              |
+|                                                     v                                              |
+|                                                                                                    |
+|  [Phase 3: Custom Token Forgery]                                                                   |
+|  Populate Structures:                                                                              |
+|    - TOKEN_USER (e.g. S-1-5-18)                                                                    |
+|    - TOKEN_GROUPS (Administrators, Authenticated Users, etc.)                                      |
+|    - TOKEN_PRIVILEGES (35 Kernel-level Privileges Enabled)                                         |
+|    - TOKEN_OWNER / TOKEN_PRIMARY_GROUP                                                             |
+|    - TOKEN_SOURCE ("TOKENGEN")                                                                     |
+|  Execute:                                                                                          |
+|    ntdll!NtCreateToken() => Yields forged hToken                                                   |
+|                                                                                                    |
+|                                                     |                                              |
+|                                                     v                                              |
+|                                                                                                    |
+|  [Phase 4: Security Modifications]                                                                 |
+|    - SetTokenInformation(TokenSessionId)      => Binds token to target interactive session         |
+|    - SetTokenInformation(TokenIntegrityLevel) => Writes S-1-16-X Mandatory Integrity Label         |
+|    - SetTokenInformation(TokenUIAccess)       => Binds UI Access flag                              |
+|                                                                                                    |
+|                                                     |                                              |
+|                                                     v                                              |
+|                                                                                                    |
+|  [Phase 5: Spawning Process]                                                                       |
+|  CreateProcessAsUserA(hToken) --(Handles Inheritance for -M:Inline)--> Spawned Child Process        |
+|                                                                                                    |
++----------------------------------------------------------------------------------------------------+
+```
+
+---
+
+### 一、 第一阶段：LSASS 凭证窃取与系统级线程模拟
+由于直接调用未公开内核函数 `NtCreateToken` 进行令牌锻造属于极高特权操作，调用线程必须处于 `NT AUTHORITY\SYSTEM` 安全上下文中，并持有 `SeCreateTokenPrivilege`（创建令牌特权，该特权在 Windows 用户态中默认仅分配给 `SYSTEM`、`LSASS` 等系统级守护进程，任何普通管理员均不直接持有）。
+
+因此，程序必须首先通过 LSASS（本地安全权威子系统）凭证窃取，获取系统级令牌并进行线程模拟。
+
+#### 1.1 `SeDebugPrivilege` 提权赋能
+在进行跨进程内存与句柄操作前，当前进程需要先向其自身的令牌注入并启用调试特权 `SeDebugPrivilege`：
+```cpp
+EnablePrivilege(NULL, "SeDebugPrivilege");
+```
+`SeDebugPrivilege` 允许安全工具绕过常规的系统自主访问控制列表 (DACL)，使其有权打开任意进程（包括运行在 `SYSTEM` 空间下的高敏感系统服务）。
+
+#### 1.2 打开 LSASS 与获取凭证令牌
+调用源码级函数 `GetLsassToken()`，其底层实现包含三个步骤：
+1. **定位 PID**：通过进程名检索 `lsass.exe` 进程的 PID。
+2. **进程句柄获取**：使用 `OpenProcess` 请求 `PROCESS_QUERY_INFORMATION` 权限打开 LSASS 进程。
+3. **令牌句柄提取**：调用 `OpenProcessToken` 获取 LSASS 进程的 Primary Token，并申请 `TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_IMPERSONATE` 权限。
+```cpp
+HANDLE hLsassProc = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, lsassPid);
+HANDLE hLsassToken = NULL;
+OpenProcessToken(hLsassProc, TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_IMPERSONATE, &hLsassToken);
+```
+
+#### 1.3 切换至 SYSTEM 模拟上下文
+通过 `ImpersonateLoggedOnUser` 将当前调用线程的“安全上下文”切换（模拟）为 LSASS 对应的系统级访问令牌：
+```cpp
+ImpersonateLoggedOnUser(hLsassToken);
+```
+一旦模拟成功，当前线程即在内核层面取得了 `NT AUTHORITY\SYSTEM` 的等效执行权限。此时，线程将能够成功激活并使用 `SeCreateTokenPrivilege` 与 `SeTcbPrivilege`，为下一阶段的 `NtCreateToken` 扫清安全边界障碍。
+
+---
+
+### 二、 第二阶段：底层内核级 `NtCreateToken` 令牌伪造
+传统的 Windows API （如 `DuplicateTokenEx`）本质上是在既有访问令牌上做“减法”或微调。如果需要在一张“白纸”上从无到有地、纯手工锻造出任意安全主体（如伪造全新的用户 SID、组 SIDs 集合、并且无视组策略强行开启全部特权），就必须调用 Windows NT 系统底层未公开的系统调用：`ntdll!NtCreateToken`。
+
+#### 2.1 函数声明与动态解析
+由于 `NtCreateToken` 属于未公开 Native API，源码中通过动态解析 `ntdll.dll` 导出表获取其函数指针：
+```cpp
+typedef NTSTATUS(NTAPI* PNtCreateToken)(
+    PHANDLE TokenHandle,
+    ACCESS_MASK DesiredAccess,
+    POBJECT_ATTRIBUTES ObjectAttributes,
+    TOKEN_TYPE TokenType,
+    PLUID AuthenticationId,
+    PLARGE_INTEGER ExpirationTime,
+    PTOKEN_USER User,
+    PTOKEN_GROUPS Groups,
+    PTOKEN_PRIVILEGES Privileges,
+    PTOKEN_OWNER Owner,
+    PTOKEN_PRIMARY_GROUP PrimaryGroup,
+    PTOKEN_DEFAULT_DACL DefaultDacl,
+    PTOKEN_SOURCE TokenSource
+);
+```
+
+#### 2.2 核心输入结构体的构建细节
+在源码 `CreateCustomToken()` 中，对该 API 所需的关键参数结构体进行了极其严密的手工填充：
+
+1. **`TOKEN_USER` (用户主体定义)**：
+   包含指向目标用户安全标识符 (`pUserSid`) 的指针。该 SID 可以是 `SYSTEM` (`S-1-5-18`)、`TrustedInstaller`、`LOCAL SERVICE` 或任何目标自定义用户账户。
+
+2. **`TOKEN_GROUPS` (安全组集合构建)**：
+   此结构体指明该访问令牌关联的所有安全组。源码通过向堆内存动态申请 `TOKEN_GROUPS` 空间，将其 `GroupCount` 动态扩充，并将以下安全组 SID 压入：
+   - **用户 SID 自身**：属性设为 `SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_OWNER`。
+   - **Logon SID (登录标识符)**：提供交互式登录关联性。
+   - **Administrators 组 (`S-1-5-32-544`)**：强制写入管理员别名 SID，确保进程在管理员安全过滤链中。
+   - **Authenticated Users (`S-1-5-11`) & Everyone (`S-1-1-0`)**：赋予基本的系统资源访问与继承权。
+   - **强制完整性标签 (System Integrity, `S-1-16-16384`)**：作为内置完整性参考。
+   - **自定义扩展安全组**：动态解析用户在 GUI 界面或 CLI 中配置的附加组（如 `S-1-5-32-545` Users 组等）。
+
+3. **`TOKEN_PRIVILEGES` (35 项特权全激活锻造)**：
+   这是本工具最核心的越权突破点。Windows 默认分配的特权一般因用户组而异，且许多特权初始处于 `Disabled` 状态。
+   在手工锻造时，源码直接分配了 35 个特权槽位，将 LUID 标识（`LowPart` 从 `2` 到 `36`）直接与特权映射，并强行将其属性属性字赋予为：
+   ```cpp
+   pPrivs->Privileges[i].Attributes = SE_PRIVILEGE_ENABLED_BY_DEFAULT | SE_PRIVILEGE_ENABLED;
+   ```
+   这意味着，该令牌一经诞生，便在硬件与系统内核级直接拥有**完全激活、默认启用的 35 项最高系统特权**（包括 `SeTakeOwnershipPrivilege` 夺取所有权、`SeRestorePrivilege` 任意文件恢复、`SeLoadDriverPrivilege` 内核驱动加载、`SeTcbPrivilege` 系统可信基等），实现名副其实的“黄金令牌”。
+
+4. **`TOKEN_SOURCE` (令牌来源伪造)**：
+   设置令牌生成源。源码中显式伪造来源名称为 `"TOKENGEN"`，以此标记该令牌是由安全沙盒锻造器直接向内核注册生成的。
+
+5. **认证标识与生存期**：
+   - `AuthenticationId` 设为 `SYSTEM_LUID` (`{ 0x3e7, 0 }`)，向内核宣称该主体通过了系统级别的底层认证。
+   - `ExpirationTime` 设置为 `-1`（即 `0xFFFFFFFF_FFFFFFFF`），使该伪造令牌永不过期。
+
+通过执行 `NtCreateToken`，内核在内存空间中初始化并实例化该访问令牌，返回一个极高访问权限的令牌句柄 `hNewToken`。
+
+---
+
+### 三、 第三阶段：强制安全完整性级别写入与安全边界跨越
+安全访问令牌锻造完毕后，还必须通过 Windows 强制完整性控制 (Mandatory Integrity Control, MIC) 和用户界面特权隔离 (User Interface Privilege Isolation, UIPI) 策略的校验。
+
+#### 3.1 强制安全完整性级别 (Mandatory Integrity Level)
+Windows 将执行环境分为四个主要安全级别：
+- **Untrusted (不信任)** / **Low (低)** (`S-1-16-4096`)：用于沙箱沙盒、高风险浏览器。
+- **Medium (中)** (`S-1-16-8192`)：普通用户运行级别。
+- **High (高)** (`S-1-16-12288`)：管理员提升运行级别。
+- **System (系统)** (`S-1-16-16384`)：操作系统内核与核心服务级别。
+
+源码在 `ExecuteSudoOperation()` 中，通过 `SetTokenInformation` 的 `TokenIntegrityLevel` 模式，动态改写访问令牌中的**强制完整性标签 (Mandatory Label)**：
+```cpp
+SID sid = {};
+sid.Revision = SID_REVISION;
+sid.SubAuthorityCount = 1;
+sid.IdentifierAuthority = SECURITY_MANDATORY_LABEL_AUTHORITY;
+sid.SubAuthority[0] = integrityLevel; // 对应目标 IL 编码
+
+TOKEN_MANDATORY_LABEL tml = {};
+tml.Label.Attributes = SE_GROUP_INTEGRITY;
+tml.Label.Sid = &sid;
+
+SetTokenInformation(hToken, TokenIntegrityLevel, &tml, sizeof(TOKEN_MANDATORY_LABEL) + sizeof(DWORD));
+```
+这一机制允许该工具既可以向上提升完整性至 `System`，也可以向下降权限制令牌为 `Low`，以在高度受限的安全沙盒中运行不可信进程。
+
+#### 3.2 UI Access 辅助控制提权标志 (`TokenUIAccess`)
+在 Windows 中，低完整性级别（或常规级别）的进程默认无法向高完整性级别的窗口发送 `WM_DROPFILES`、`WM_COPYDATA` 或其他窗口消息，这被称为 **UIPI (用户界面特权隔离)**。
+然而，Windows 为屏幕阅读器等辅助工具留出了一个特权通道——**UI Access**。
+
+当在命令行传入 `--UIAccess` 或在 GUI 勾选该选项时，程序会向伪造的令牌写入 `TokenUIAccess` 属性：
+```cpp
+BOOL UIAccess = TRUE;
+SetTokenInformation(hToken, TokenUIAccess, &UIAccess, sizeof(BOOL));
+```
+一旦该标志被写入，进程即可打破 UIPI 物理隔离，实现跨越屏幕特权边界的交互窗口控制。
+
+---
+
+### 四、 第四阶段：新进程的令牌化拉起与现代控制台 I/O 绑定
+有了定制的 `hToken` 后，最后一项工程挑战是如何完美地以此令牌衍生出新的用户态进程。
+
+#### 4.1 会话 ID 动态绑定 (Session ID Binding)
+LSASS 系统令牌默认工作在 **Session 0**（孤立的后台服务会话空间），如果直接用该令牌启动交互式程序（如 `cmd.exe`），程序会卡死在后台，无法在用户当前所在的活动桌面（通常为 **Session 1** 或 **Session 2**）上呈现。
+
+为解决此问题，源码首先通过 `GetActiveSessionID()` 获取当前真实活跃用户的 Session ID（即物理显示桌面所在的会话 ID），并在启动进程前将其强制写入令牌中：
+```cpp
+SetTokenInformation(hToken, TokenSessionId, &targetSessionId, sizeof(DWORD));
+```
+这一步极为关键，它确保了高权限的子进程能够精准地“跨越会话边界”，投递到当前用户的桌面窗口中。
+
+#### 4.2 终结 `-M:Inline` 内联运行死锁机制 (Handle Inheritance)
+在命令行中以内联方式 (`-M:Inline`) 调起子进程时，如果简单使用 `CREATE_NEW_CONSOLE` 标志，子进程会脱离当前的 CMD 控制台，强行弹出新窗口，并可能因标准 I/O（stdin, stdout, stderr）句柄被多路复用重定向而引发**多线程/多进程读写锁死锁卡死**。
+
+为了使子进程完美地在“当前已经打开的控制台窗口”内输出，源码进行了以下底层的句柄承袭与控制台重绘重定向：
+1. **剥离 `CREATE_NEW_CONSOLE`**：当处于 Inline 模式时，创建标志仅保留 `CREATE_UNICODE_ENVIRONMENT`。
+2. **强行绑定标准输入输出**：将当前控制台的标准输入、标准输出、标准错误句柄直接复制给 `STARTUPINFOA` 结构：
+   ```cpp
+   if (windowMode == -1) { // -M:Inline
+       si.dwFlags |= STARTF_USESTDHANDLES;
+       si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+       si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+       si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+   }
+   ```
+3. **开启句柄继承**：向系统底层调用 `CreateProcessAsUserA` 时，将 `bInheritHandles` 物理参数强制设为 `TRUE`：
+   ```cpp
+   CreateProcessAsUserA(
+       hToken, NULL, cmdLine, NULL, NULL, (windowMode == -1) ? TRUE : FALSE,
+       dwCreationFlags, lpEnv, lpCurrentDir, &si, &pi
+   );
+   ```
+通过这一精密的工程化重构，子进程将安全地复用并继承当前控制台的标准输入/输出管道。用户在当前命令行中敲击的任何字符、子进程输出的任何文本，都会无感、实时、零延迟地在当前控制台交互呈现，彻底消除了进程悬挂和死锁。
+
+---
+
 ## 🌟 最新版重磅升级与改进 (Latest Enhancements)
 
 1. **安全预设极简优化**

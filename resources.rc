@@ -1,3 +1,5 @@
+IDI_ICON1 ICON "app_icon.ico"
+
 #include <windows.h>
 
 // Embed manifest
