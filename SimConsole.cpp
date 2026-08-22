@@ -1,6 +1,8 @@
 #include "SimConsole.h"
 #include "Globals.h"
 #include "Utils.h"
+#include "TokenEngine.h"
+#include <string>
 
 int GetDisplayWidth(const std::string& str) {
     int w = 0;
@@ -17,7 +19,7 @@ int GetDisplayWidth(const std::string& str) {
     return w;
 }
 
-string PadRight(const std::string& str, int width) {
+std::string PadRight(const std::string& str, int width) {
     int curW = GetDisplayWidth(str);
     int pad = width - curW;
     if (pad <= 0) return str;
