@@ -77,7 +77,7 @@ EnablePrivilege(NULL, "SeDebugPrivilege");
 
 #### 1.2 打开 LSASS 与获取凭证令牌
 调用源码级函数 `GetLsassToken()`，其底层实现包含三个步骤：
-1. **定位 PID**：通过进程名检索 `lsass.exe` 进程的 PID。
+1. **定位 PID**：通过进程名检索 `lsass.exe` 进程 of the PID。
 2. **进程句柄获取**：使用 `OpenProcess` 请求 `PROCESS_QUERY_INFORMATION` 权限打开 LSASS 进程。
 3. **令牌句柄提取**：调用 `OpenProcessToken` 获取 LSASS 进程的 Primary Token，并申请 `TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_IMPERSONATE` 权限。
 ```cpp
@@ -228,6 +228,73 @@ SetTokenInformation(hToken, TokenSessionId, &targetSessionId, sizeof(DWORD));
 
 ---
 
+## 📂 模块化目录树与文件职责说明 (Modular Codebase Architecture)
+
+为保障系统的长期维护性、方便安全研究人员与开发者敏捷地**增减、替换、扩展功能**，项目已由单一的庞大源文件重构为以下严谨、高内聚、低耦合的多文件模块化 C++ 工程：
+
+```text
+/home/user/
+├── Common.h             # 基础标准头文件声明中心
+├── Globals.h/.cpp       # 全局参数与配置注册中心
+├── Utils.h/.cpp         # 系统底层基础工具库
+├── TokenEngine.h/.cpp   # 安全令牌锻造与提权引擎
+├── ThemeEngine.h/.cpp   # Fluent UI 视觉重绘与暗黑主题引擎
+├── SimConsole.h/.cpp    # Simulation Terminal 仿真等宽渲染驱动
+├── UIEditor.h/.cpp      # 附加组与特权状态次级高级窗口编辑器
+├── MainWindow.h/.cpp    # Win32 GDI 主窗口交互消息泵 (WndProc)
+├── Main.cpp             # 主程序程序入口及命令行解析器 (main / WinMain)
+├── resources.rc         # Windows GDI 资源及极简平面盾牌图标绑定脚本
+├── TokenGenerator.manifest # 自动管理员 UAC 提权及 Common-Controls 控件绑定清单
+├── build.bat            # Windows 环境 MinGW 本地一键静态编译脚本
+└── build.sh             # Linux 环境 MinGW 交叉一键静态编译脚本
+```
+
+### 文件的详细职能解析：
+
+#### 1. `Common.h`（基础标准头文件声明中心）
+* 集中包含了系统所必需的所有底层 Windows API、NT 系统级接口、多线程及 C++ 标准库依赖。
+* 动态导入并声明了未公开内核函数 `PNtCreateToken` 以及 Windows 暗黑模式底层切换函数 `PDwmSetWindowAttribute`。
+* 定义了项目的核心全局结构体（如安全预设 `Preset`、特权属性描述 `PrivInfo` 和日志等级 `LogLevel`）。
+
+#### 2. `Globals.h` / `Globals.cpp`（全局参数与配置注册中心）
+* 集中定义并声明了所有跨文件访问的全局变量、控件句柄、主题画刷与字体资源。
+* 注册了所有的 Win32 控件唯一 ID 标识（如 `ID_BTN_RUN`，`ID_LISTVIEW_GROUPS` 等）。
+* 解耦存储了 Windows 35 项内核安全特权的英文名称及其中文状态释义对照表 `g_PrivInfos`。
+
+#### 3. `Utils.h` / `Utils.cpp`（系统底层基础工具库）
+* 封装了系统级的状态控制与安全检查函数（如 `IsUserAnAdmin` 检查自身管理员提权）。
+* 提供了底层进程、SID 及安全标识符的处理函数（如 `GetPidByNameA` 查找系统服务，`GetLogonSid` 提取交互式会话，`EnablePrivilege` 单独开启调试特权）。
+* 包含了控制台及 GUI 实时日志分发引擎 `Log`、`Log_ErrorCode`。
+
+#### 4. `TokenEngine.h` / `TokenEngine.cpp`（安全访问令牌锻造与提权引擎）
+* 存放了本项目的安全算法核心。负责 `GetLsassToken()` 安全提取和模拟。
+* 负责 `CreateCustomToken()` 零基础内存拼接，设置会话绑定，并调用底层的系统级 `NtCreateToken` 完美组装全新黄金令牌。
+* 负责 `ExecuteSudoOperation()` 的环境块绑定、UI Access 特权设置、强制安全完整性写入、承袭控制台标准 I/O 句柄，最终调用 `CreateProcessAsUserA` 派生子进程。
+
+#### 5. `ThemeEngine.h` / `ThemeEngine.cpp`（Fluent UI 视觉重绘与暗黑主题引擎）
+* 提供了 Windows 11/10 现代视觉样式支持。检测 `AppsUseLightTheme` 自适应并更新全局主题颜色。
+* 采用了**窗口子类化 (SetWindowSubclass)** 技术捕获按键消息并动态接管其 `WM_PAINT`，为系统自带的平铺按钮赋予丝滑的扁平、悬停及按压颜色渐变反馈。
+* 负责 `DrawCardFrame()` 画刷背景渲染，为整个界面勾勒出对称、透气、极具现代 Fluent 磨砂质感的立体功能卡片。
+
+#### 6. `SimConsole.h` / `SimConsole.cpp`（Simulation Terminal 仿真等宽渲染驱动）
+* 内嵌了中文/多字节自研等宽列对齐计算器 `GetDisplayWidth()`，消除传统 `strlen` 计算汉字导致的严重右侧终端排版错位。
+* 负责 `UpdateTokenPreview()` 毫秒级提取当前已配置的身份和特权状态，高保真格式化渲染出经典、极具极客质感的 `whoami /all` 仿真预览框。
+
+#### 7. `UIEditor.h` / `UIEditor.cpp`（附加组与特权状态次级高级窗口编辑器）
+* 完全剥离了两个高级自定义窗口的绘制与循环逻辑。
+* 提供了组编辑器 `GroupEditorWndProc`（支持任意自定义 SID 附加组的毫秒级注入与移出）。
+* 提供了特权编辑器 `PrivilegeEditorWndProc`（支持 35 项最高核心特权的单独激活、设置为 Disabled，或者利用 `CreateRestrictedToken` 进行安全特权的物理切除剥夺）。
+
+#### 8. `MainWindow.h` / `MainWindow.cpp`（Win32 GDI 主窗口交互消息泵）
+* 仅包含最核心的主界面 Win32 消息循环控制器 `WndProc`。
+* 负责主窗口及其所有下拉控件、文本输入卡片、勾选组件的初始化创建，分发重绘，响应自适应 `WM_SETTINGCHANGE` 消息，在不重启进程的前提下无缝刷新 UI 视觉皮肤。
+
+#### 9. `Main.cpp`（主程序程序入口及命令行解析器）
+* 集成了最外层命令行 CLI 运行流程。负责 `ParseCommandLine()` 处理静默参数及预设参数（如 `-Use:TrustedInstaller+`，`-M:Inline`，`-IL:Low`）。
+* 在 `main()` 和 `WinMain()` 中检查 UAC 管理员运行权限，根据参数特征智能引导是输出终端 CLI 使用手册，还是显式派生自适应的 Fluent GUI 桌面窗口。
+
+---
+
 ## 🌟 最新版重磅升级与改进 (Latest Enhancements)
 
 1. **安全预设极简优化**
@@ -270,9 +337,9 @@ SetTokenInformation(hToken, TokenSessionId, &targetSessionId, sizeof(DWORD));
    x86_64-w64-mingw32-windres resources.rc -o resources.o
    ```
 
-2. **静态联立编译 UTF-8 源码（自动翻译为中文 GBK 字节码）：**
+2. **静态联立编译多文件源码并翻译为中文 GBK 字节码：**
    ```bash
-   x86_64-w64-mingw32-g++ -Ofast -Wall -Wextra -static TokenGenerator.cpp resources.o -o TokenGenerator.exe -lwtsapi32 -luserenv -lntdll -ladvapi32 -lgdi32 -lcomctl32 -lcomdlg32 -luuid -lole32
+   x86_64-w64-mingw32-g++ -Ofast -Wall -Wextra -static -finput-charset=UTF-8 -fexec-charset=GBK Main.cpp Globals.cpp Utils.cpp TokenEngine.cpp ThemeEngine.cpp SimConsole.cpp UIEditor.cpp MainWindow.cpp resources.o -o TokenGenerator.exe -lwtsapi32 -luserenv -lntdll -ladvapi32 -lgdi32 -lcomctl32 -lcomdlg32 -luuid -lole32
    ```
 
 ---
@@ -310,5 +377,3 @@ TokenGenerator.exe -IL:Low -M:Hide "powershell.exe -ExecutionPolicy Bypass -File
 ```
 
 ---
-
-*Developed and upgraded with ❤️ by Arena.ai*
